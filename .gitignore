@@ -20,3 +20,7 @@ include/jitify_options.hpp
 autom4te.cache/*
 .vscode
 cmake/CPM_*.cmake
+*.log
+run_amg_ddagd_baseline.sh
+build-mg/
+build/

@@ -2850,6 +2850,23 @@ void eigensolveQuda(void **host_evecs, double _Complex *host_evals, QudaEigParam
   popVerbosity();
 }
 
+// When set, the MG hierarchy is built on the normal operator D^dag D: the fine
+// inter-grid residual, smoother, and null-space operators are wrapped as
+// DiracMdagM (rather than DiracM), pairing with the matrix-free Galerkin coarse
+// operator installed in MG::createCoarseDirac. See the QUDA_MG_NORMAL_GALERKIN
+// path for details. Two levels only.
+static bool mg_normal_galerkin()
+{
+  static const bool enabled = (getenv("QUDA_MG_NORMAL_GALERKIN") != nullptr);
+  return enabled;
+}
+
+static quda::DiracMatrix *make_fine_mg_op(const quda::Dirac &d)
+{
+  if (mg_normal_galerkin()) return new quda::DiracMdagM(d);
+  return new quda::DiracM(d);
+}
+
 multigrid_solver::multigrid_solver(QudaMultigridParam &mg_param)
 {
   QudaInvertParam *param = mg_param.invert_param;
@@ -2883,7 +2900,7 @@ multigrid_solver::multigrid_solver(QudaMultigridParam &mg_param)
   DiracParam diracParam;
   setDiracSloppyParam(diracParam, param, outer_pc_solve);
   d = Dirac::create(diracParam);
-  m = new DiracM(*d);
+  m = make_fine_mg_op(*d);
 
   // this is the Dirac operator we use for smoothing
   DiracParam diracSmoothParam;
@@ -2892,7 +2909,7 @@ multigrid_solver::multigrid_solver(QudaMultigridParam &mg_param)
   setDiracSloppyParam(diracSmoothParam, param, fine_grid_pc_solve);
   diracSmoothParam.halo_precision = mg_param.smoother_halo_precision[0];
   dSmooth = Dirac::create(diracSmoothParam);
-  mSmooth = new DiracM(*dSmooth);
+  mSmooth = make_fine_mg_op(*dSmooth);
 
   // this is the Dirac operator we use for sloppy smoothing (we use the preconditioner fields for this)
   DiracParam diracSmoothSloppyParam;
@@ -2901,7 +2918,7 @@ multigrid_solver::multigrid_solver(QudaMultigridParam &mg_param)
   diracSmoothSloppyParam.halo_precision = mg_param.smoother_halo_precision[0];
 
   dSmoothSloppy = Dirac::create(diracSmoothSloppyParam);
-  mSmoothSloppy = new DiracM(*dSmoothSloppy);
+  mSmoothSloppy = make_fine_mg_op(*dSmoothSloppy);
 
   ColorSpinorParam csParam(nullptr, *param, cudaGauge->X(), pc_solution, mg_param.setup_location[0]);
   csParam.create = QUDA_NULL_FIELD_CREATE;
@@ -3016,7 +3033,7 @@ void updateMultigridQuda(void *mg_, QudaMultigridParam *mg_param)
     DiracParam diracParam;
     setDiracSloppyParam(diracParam, param, outer_pc_solve);
     mg->d = Dirac::create(diracParam);
-    mg->m = new DiracM(*(mg->d));
+    mg->m = make_fine_mg_op(*(mg->d));
 
     // this is the Dirac operator we use for smoothing
     DiracParam diracSmoothParam;
@@ -3024,14 +3041,14 @@ void updateMultigridQuda(void *mg_, QudaMultigridParam *mg_param)
       || (mg_param->smoother_solve_type[0] == QUDA_NORMOP_PC_SOLVE);
     setDiracSloppyParam(diracSmoothParam, param, fine_grid_pc_solve);
     mg->dSmooth = Dirac::create(diracSmoothParam);
-    mg->mSmooth = new DiracM(*(mg->dSmooth));
+    mg->mSmooth = make_fine_mg_op(*(mg->dSmooth));
 
     // this is the Dirac operator we use for sloppy smoothing (we use the preconditioner fields for this)
     DiracParam diracSmoothSloppyParam;
     setDiracPreParam(diracSmoothSloppyParam, param, fine_grid_pc_solve, true);
     mg->dSmoothSloppy = Dirac::create(diracSmoothSloppyParam);
     ;
-    mg->mSmoothSloppy = new DiracM(*(mg->dSmoothSloppy));
+    mg->mSmoothSloppy = make_fine_mg_op(*(mg->dSmoothSloppy));
 
     mg->mgParam->matResidual = mg->m;
     mg->mgParam->matSmooth = mg->mSmooth;

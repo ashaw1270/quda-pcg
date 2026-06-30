@@ -13,6 +13,15 @@ namespace quda
 
   using namespace blas;
 
+  // When set, the MG hierarchy is built on the normal operator D^dag D with a
+  // true Galerkin coarse operator P^dag (D^dag D) P (two levels only). See
+  // DiracGalerkinNormal and createCoarseDirac().
+  static bool mg_normal_galerkin()
+  {
+    static const bool enabled = (getenv("QUDA_MG_NORMAL_GALERKIN") != nullptr);
+    return enabled;
+  }
+
   MG::MG(MGParam &param) :
     Solver(*param.matResidual, *param.matSmooth, *param.matSmoothSloppy, *param.matSmoothSloppy, param),
     param(param),
@@ -424,9 +433,33 @@ namespace quda
     if (matCoarseResidual) delete matCoarseResidual;
     if (matCoarseSmoother) delete matCoarseSmoother;
     if (matCoarseSmootherSloppy) delete matCoarseSmootherSloppy;
-    matCoarseResidual = new DiracM(*diracCoarseResidual);
-    matCoarseSmoother = new DiracM(*diracCoarseSmoother);
-    matCoarseSmootherSloppy = new DiracM(*diracCoarseSmootherSloppy);
+
+    if (mg_normal_galerkin() && param.level == 0) {
+      // Replace the link-based coarse operator with the matrix-free Galerkin
+      // normal operator A_c = P^dag (D^dag D) P. The DiracCoarse objects built
+      // above are kept only for metadata/Expose()/prepare()/reconstruct(); their
+      // apply is overridden by DiracGalerkinNormal. Two levels only.
+      if (fineNormalOp) delete fineNormalOp;
+      fineNormalOp = new DiracMdagM(*param.matSmoothSloppy->Expose());
+
+      // Fine-grid template for the coarse operator's temporaries, at the
+      // preconditioner precision used by the coarse solve and fine normal op.
+      ColorSpinorParam fineParam(param.B[0]);
+      fineParam.create = QUDA_NULL_FIELD_CREATE;
+      fineParam.location = QUDA_CUDA_FIELD_LOCATION;
+      QudaPrecision prec = param.mg_global.invert_param->cuda_prec_precondition;
+      fineParam.setPrecision(prec, prec, true);
+
+      matCoarseResidual = new DiracGalerkinNormal(*diracCoarseResidual, *transfer, *fineNormalOp, fineParam);
+      matCoarseSmoother = new DiracGalerkinNormal(*diracCoarseSmoother, *transfer, *fineNormalOp, fineParam);
+      matCoarseSmootherSloppy
+        = new DiracGalerkinNormal(*diracCoarseSmootherSloppy, *transfer, *fineNormalOp, fineParam);
+      logQuda(QUDA_VERBOSE, "Using matrix-free Galerkin normal coarse operator P^dag (D^dag D) P\n");
+    } else {
+      matCoarseResidual = new DiracM(*diracCoarseResidual);
+      matCoarseSmoother = new DiracM(*diracCoarseSmoother);
+      matCoarseSmootherSloppy = new DiracM(*diracCoarseSmootherSloppy);
+    }
 
     logQuda(QUDA_VERBOSE, "Coarse Dirac operator done\n");
 
@@ -713,6 +746,7 @@ namespace quda
       }
 
       if (transfer) delete transfer;
+      if (fineNormalOp) delete fineNormalOp;
       if (matCoarseSmootherSloppy) delete matCoarseSmootherSloppy;
       if (diracCoarseSmootherSloppy) delete diracCoarseSmootherSloppy;
       if (matCoarseSmoother) delete matCoarseSmoother;

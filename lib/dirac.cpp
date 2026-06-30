@@ -1,6 +1,7 @@
 #include <dirac_quda.h>
 #include <dslash_quda.h>
 #include <blas_quda.h>
+#include <transfer.h>
 
 namespace quda {
 
@@ -527,6 +528,19 @@ namespace quda {
   void Dirac::prefetch(QudaFieldLocation mem_space, qudaStream_t stream) const
   {
     if (gauge) gauge->prefetch(mem_space, stream);
+  }
+
+  void DiracGalerkinNormal::operator()(cvector_ref<ColorSpinorField> &out,
+                                       cvector_ref<const ColorSpinorField> &in) const
+  {
+    // A_c v = R (D^dag D) (P v): prolong to the fine grid, apply the fine normal
+    // operator, then restrict back to the coarse grid.
+    auto f0 = getFieldTmp<ColorSpinorField>(in.size(), fine_param);
+    auto f1 = getFieldTmp<ColorSpinorField>(in.size(), fine_param);
+    T.P(f0, in);
+    fineNormal(f1, f0);
+    T.R(out, f1);
+    if (shift != 0.0) blas::axpy(shift, in, out);
   }
 
 } // namespace quda

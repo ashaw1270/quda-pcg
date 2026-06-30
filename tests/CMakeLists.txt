@@ -164,6 +164,12 @@ if(QUDA_MULTIGRID)
   quda_checkbuildtest(multigrid_evolve_test QUDA_BUILD_ALL_TESTS)
   install(TARGETS multigrid_evolve_test ${QUDA_EXCLUDE_FROM_INSTALL} DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+  # Galerkin-AMG PCG baseline for D^dag D x = D^dag psi (MatrixPreNet comparison)
+  add_executable(amg_pcg_ddag_baseline amg_pcg_ddag_baseline.cpp)
+  target_link_libraries(amg_pcg_ddag_baseline ${TEST_LIBS})
+  quda_checkbuildtest(amg_pcg_ddag_baseline QUDA_BUILD_ALL_TESTS)
+  install(TARGETS amg_pcg_ddag_baseline ${QUDA_EXCLUDE_FROM_INSTALL} DESTINATION ${CMAKE_INSTALL_BINDIR})
+
 endif()
 
 if(QUDA_BUILD_NATIVE_LAPACK)

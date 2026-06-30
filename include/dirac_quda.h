@@ -2385,6 +2385,36 @@ public:
     virtual bool hermitian() const override { return true; } // normal op is always Hermitian
   };
 
+  /**
+     @brief Matrix-free Galerkin coarse operator for the normal operator.
+     Applies A_c = R (D^dag D) P to coarse-grid vectors, where P and R are the
+     multigrid prolongator/restrictor and D^dag D is the fine normal operator.
+     This realizes a true two-level Galerkin hierarchy on D^dag D without ever
+     forming the coarse links (the matrix-free coarse operator cannot itself be
+     re-coarsened, hence two levels only).  It wraps a coarse Dirac purely for
+     metadata and Expose()/prepare()/reconstruct() plumbing; only the apply is
+     overridden.
+  */
+  class DiracGalerkinNormal : public DiracMatrix
+  {
+    const Transfer &T;             /** prolongator/restrictor between coarse and fine */
+    const DiracMatrix &fineNormal; /** fine normal operator D^dag D */
+    ColorSpinorParam fine_param;   /** template for the fine-grid temporaries */
+
+  public:
+    DiracGalerkinNormal(const Dirac &coarse_dirac, const Transfer &T, const DiracMatrix &fineNormal,
+                        const ColorSpinorParam &fine_param) :
+      DiracMatrix(coarse_dirac), T(T), fineNormal(fineNormal), fine_param(fine_param)
+    {
+    }
+
+    void operator()(cvector_ref<ColorSpinorField> &out, cvector_ref<const ColorSpinorField> &in) const override;
+
+    int getStencilSteps() const override { return 2; } // P then D^dag D then R
+
+    virtual bool hermitian() const override { return true; } // R (D^dag D) P is Hermitian for R = P^dag
+  };
+
   /* Gloms onto a DiracOp and provides an operator() which applies its MdagMLocal */
   class DiracMdagMLocal : public DiracMatrix
   {

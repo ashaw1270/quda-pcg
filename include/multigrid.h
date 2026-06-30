@@ -343,6 +343,10 @@ namespace quda {
     /** Wrapper for the sloppy smoothing coarse grid operator */
     DiracMatrix *matCoarseSmootherSloppy = nullptr;
 
+    /** Fine normal operator D^dag D used by the Galerkin coarse operator
+        (QUDA_MG_NORMAL_GALERKIN mode only) */
+    DiracMatrix *fineNormalOp = nullptr;
+
     /** Parallel hyper-cubic random number generator for generating null-space vectors */
     RNG *rng = nullptr;
 
@@ -720,9 +724,11 @@ namespace quda {
     Dirac *dSmooth;
     Dirac *dSmoothSloppy;
 
-    DiracM *m;
-    DiracM *mSmooth;
-    DiracM *mSmoothSloppy;
+    // Base type so the fine operators may be DiracM or DiracMdagM (the latter
+    // for the QUDA_MG_NORMAL_GALERKIN hierarchy on D^dag D).
+    DiracMatrix *m;
+    DiracMatrix *mSmooth;
+    DiracMatrix *mSmoothSloppy;
 
     std::vector<ColorSpinorField> B;
 

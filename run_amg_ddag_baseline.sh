@@ -1,0 +1,102 @@
+#!/bin/bash -l
+#PBS -A NeuPreCon
+#PBS -l select=1:ngpus=4
+#PBS -q backfill
+#PBS -l walltime=00:30:00
+#PBS -j oe
+#PBS -N amg_pcg_ddag_baseline
+#
+# Run the Galerkin-AMG-preconditioned PCG baseline (D^dag D x = D^dag psi) on one
+# GPU and append per-config metrics to a CSV with the MatrixPreNet
+# test_metrics schema. The MG hierarchy is built directly on the normal operator
+# D^dag D (true Galerkin coarse operator, two levels), so one V-cycle ~ (D^dag
+# D)^{-1} is the PCG preconditioner.
+#
+# Submit, e.g.:
+#   L=8  RNG=31 qsub run_amg_ddag_baseline.sh
+#   L=16 RNG=37 qsub run_amg_ddag_baseline.sh
+# or run inside an interactive GPU job:
+#   L=8  RNG=31 bash run_amg_ddag_baseline.sh
+#
+# Env knobs (with defaults):
+#   L, RNG, BETA, KAPPA, MG_LEVELS(=2), PREC, PREC_SLOPPY, PREC_PRECON,
+#   TOL, NITER, MODEL_NAME, METRICS_CSV, GAUGE_DIR, SEED, NCONFIG, MG_EXTRA
+
+set -euo pipefail
+
+FORK_DIR="${FORK_DIR:-/lcrc/project/NeuPreCon/shawa/quda-pcg}"
+BASE_DIR="${BASE_DIR:-/lcrc/project/NeuPreCon/shawa/support-amg/quda_baseline}"
+QUDA_BUILD="${QUDA_BUILD:-${FORK_DIR}/build-mg}"
+BIN="${BIN:-${QUDA_BUILD}/tests/amg_pcg_ddag_baseline}"
+
+L="${L:-8}"
+RNG="${RNG:-31}"
+BETA="${BETA:-5.5}"
+KAPPA="${KAPPA:-0.276}"
+MG_LEVELS="${MG_LEVELS:-2}"               # Galerkin normal-op MG is two-level only
+PREC="${PREC:-double}"
+PREC_SLOPPY="${PREC_SLOPPY:-single}"      # QUDA does not compile double-precision MG by default
+PREC_PRECON="${PREC_PRECON:-single}"
+TOL="${TOL:-1e-8}"
+NITER="${NITER:-300}"
+SEED="${SEED:-1234}"
+NCONFIG="${NCONFIG:-0}"                    # 0 = all configs; >0 limits for quick debugging
+
+# D^dag D is Hermitian positive-definite, so use CG for the smoother, the coarse
+# solve and the null-space setup. Tunable via MG_EXTRA.
+MG_EXTRA="${MG_EXTRA:---mg-smoother 0 cg --mg-smoother 1 cg \
+--mg-coarse-solver 1 cg --mg-coarse-solver-maxiter 1 50 --mg-coarse-solver-tol 1 0.25 \
+--mg-setup-inv 0 cg --mg-nvec 0 24 --mg-block-size 0 4 4 4 4 \
+--mg-nu-pre 0 0 --mg-nu-post 0 4}"
+
+MODEL_NAME="${MODEL_NAME:-AMG}"
+GAUGE_DIR="${GAUGE_DIR:-${BASE_DIR}/gauges}"
+METRICS_CSV="${METRICS_CSV:-/lcrc/project/NeuPreCon/shawa/ExperimentLogs/test_metrics.csv}"
+
+echo "=== modules ==="
+module purge
+module load gcc/11.4.0 cuda/12.6.0
+export LD_LIBRARY_PATH="${QUDA_BUILD}/lib:${LD_LIBRARY_PATH:-}"
+
+# Collect gauge files for this (L, RNG, BETA) in sample order.
+mapfile -t GAUGE_FILES < <(ls -1 "${GAUGE_DIR}"/L${L}_rng${RNG}_beta${BETA}_sample*.qdp.bin 2>/dev/null | sort -t_ -k4.7n)
+if [[ ${#GAUGE_FILES[@]} -eq 0 ]]; then
+  echo "No gauge files found in ${GAUGE_DIR} for L=${L} rng=${RNG} beta=${BETA}" >&2
+  echo "Run convert_gauge.py first." >&2
+  exit 1
+fi
+if [[ "${NCONFIG}" -gt 0 ]]; then
+  GAUGE_FILES=("${GAUGE_FILES[@]:0:${NCONFIG}}")
+fi
+echo "Found ${#GAUGE_FILES[@]} gauge config(s):"
+printf '  %s\n' "${GAUGE_FILES[@]}"
+
+GAUGE_ARGS=()
+for f in "${GAUGE_FILES[@]}"; do GAUGE_ARGS+=(--baseline-gauge-file "$f"); done
+
+echo "=== running amg_pcg_ddag_baseline ==="
+set -x
+"${BIN}" \
+  --dim "${L}" "${L}" "${L}" "${L}" \
+  --dslash-type wilson \
+  --kappa "${KAPPA}" \
+  --fermion-t-boundary anti-periodic \
+  --prec "${PREC}" \
+  --prec-sloppy "${PREC_SLOPPY}" \
+  --prec-precondition "${PREC_PRECON}" \
+  --tol "${TOL}" \
+  --niter "${NITER}" \
+  --mg-levels "${MG_LEVELS}" \
+  --verbosity verbose \
+  ${MG_EXTRA} \
+  "${GAUGE_ARGS[@]}" \
+  --baseline-metrics-csv "${METRICS_CSV}" \
+  --baseline-model-name "${MODEL_NAME}" \
+  --baseline-beta "${BETA}" \
+  --baseline-rng "${RNG}" \
+  --baseline-sample-base 0 \
+  --baseline-seed "${SEED}"
+set +x
+
+echo "=== done; metrics appended to ${METRICS_CSV} ==="
+cat "${METRICS_CSV}" || true
