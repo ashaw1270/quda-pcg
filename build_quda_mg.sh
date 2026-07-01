@@ -54,9 +54,11 @@ cmake "${QUDA_SRC}" \
   -DQUDA_BUILD_ALL_TESTS=OFF \
   -DQUDA_BUILD_SHAREDLIB=ON
 
-echo "=== Building amg_pcg_ddag_baseline (jobs=${JOBS}) ==="
-cmake --build . --target amg_pcg_ddag_baseline -j "${JOBS}"
+echo "=== Building amg_pcg_ddag_baseline, amg_materialize_minv, dirac_matvec_compare (jobs=${JOBS}) ==="
+cmake --build . --target amg_pcg_ddag_baseline amg_materialize_minv dirac_matvec_compare -j "${JOBS}"
 
 echo "=== Build complete ==="
 echo "Binary: ${BUILD_DIR}/tests/amg_pcg_ddag_baseline"
-ls -la "${BUILD_DIR}/tests/amg_pcg_ddag_baseline" || true
+echo "Binary: ${BUILD_DIR}/tests/amg_materialize_minv"
+echo "Binary: ${BUILD_DIR}/tests/dirac_matvec_compare"
+ls -la "${BUILD_DIR}/tests/amg_pcg_ddag_baseline" "${BUILD_DIR}/tests/amg_materialize_minv" "${BUILD_DIR}/tests/dirac_matvec_compare" 2>/dev/null || true
