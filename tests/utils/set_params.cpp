@@ -466,6 +466,10 @@ void setMultigridParam(QudaMultigridParam &mg_param)
     mg_param.smoother_halo_precision[i] = smoother_halo_prec; // precision of the halo exchange in the smoother
     mg_param.nu_pre[i] = nu_pre[i];
     mg_param.nu_post[i] = nu_post[i];
+    mg_param.smoother_symmetric_gs[i] = mg_symmetric_gs[i] ? QUDA_BOOLEAN_TRUE : QUDA_BOOLEAN_FALSE;
+    mg_param.smoother_gs_linear[i] = mg_gs_linear[i] ? QUDA_BOOLEAN_TRUE : QUDA_BOOLEAN_FALSE;
+    mg_param.coarse_fixed_chebyshev[i] = mg_coarse_chebyshev[i] ? QUDA_BOOLEAN_TRUE : QUDA_BOOLEAN_FALSE;
+    mg_param.coarse_chebyshev_degree[i] = mg_coarse_chebyshev_degree[i];
     mg_param.mu_factor[i] = mu_factor[i];
 
     mg_param.cycle_type[i] = QUDA_MG_CYCLE_RECURSIVE;
@@ -1080,6 +1084,10 @@ void setStaggeredMultigridParam(QudaMultigridParam &mg_param)
     mg_param.smoother_halo_precision[i] = smoother_halo_prec; // precision of the halo exchange in the smoother
     mg_param.nu_pre[i] = nu_pre[i];
     mg_param.nu_post[i] = nu_post[i];
+    mg_param.smoother_symmetric_gs[i] = mg_symmetric_gs[i] ? QUDA_BOOLEAN_TRUE : QUDA_BOOLEAN_FALSE;
+    mg_param.smoother_gs_linear[i] = mg_gs_linear[i] ? QUDA_BOOLEAN_TRUE : QUDA_BOOLEAN_FALSE;
+    mg_param.coarse_fixed_chebyshev[i] = mg_coarse_chebyshev[i] ? QUDA_BOOLEAN_TRUE : QUDA_BOOLEAN_FALSE;
+    mg_param.coarse_chebyshev_degree[i] = mg_coarse_chebyshev_degree[i];
     mg_param.mu_factor[i] = mu_factor[i];
 
     mg_param.transfer_type[i] = (i == 0) ? staggered_transfer_type : QUDA_TRANSFER_AGGREGATE;

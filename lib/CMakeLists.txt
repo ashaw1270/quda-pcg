@@ -34,6 +34,7 @@ set (QUDA_OBJS
   inv_cgnr.cpp inv_cgne.cpp
   inv_cg3_quda.cpp inv_ca_gcr.cpp inv_ca_cg.cpp
   inv_gcr_quda.cpp inv_mr_quda.cpp inv_sd_quda.cpp
+  inv_gs_quda.cpp inv_chebyshev_quda.cpp
   inv_pcg_quda.cpp inv_mre.cpp interface_quda.cpp util_quda.cpp
   color_spinor_field.cpp color_spinor_util.cu color_spinor_project_domain_decomp.cu
   field_cache.cpp

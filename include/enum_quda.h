@@ -128,8 +128,23 @@ typedef enum QudaInverterType_s {
   QUDA_CA_CGNE_INVERTER,
   QUDA_CA_CGNR_INVERTER,
   QUDA_CA_GCR_INVERTER,
+  QUDA_GS_INVERTER,        /**< Red-black Gauss-Seidel relaxation (used as an MG smoother) */
+  QUDA_CHEBYSHEV_INVERTER, /**< Fixed-degree Chebyshev iteration (used as an MG coarse solve) */
   QUDA_INVALID_INVERTER = QUDA_INVALID_ENUM
 } QudaInverterType;
+
+/**
+   Sweep ordering for the Gauss-Seidel smoother.  A forward sweep updates the
+   even (red) checkerboard before the odd (black) checkerboard; a backward sweep
+   reverses that order.  Using a forward pre-smoother together with a backward
+   post-smoother (with matched sweep counts) makes the overall smoother
+   self-adjoint, which is required for a Hermitian AMG preconditioner.
+*/
+typedef enum QudaGaussSeidelOrder_s {
+  QUDA_GS_FORWARD_ORDER = 0,
+  QUDA_GS_BACKWARD_ORDER = 1,
+  QUDA_GS_ORDER_INVALID = QUDA_INVALID_ENUM
+} QudaGaussSeidelOrder;
 
 typedef enum QudaEigType_s {
   QUDA_EIG_TR_LANCZOS,     // Thick restarted lanczos solver

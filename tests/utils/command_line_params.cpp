@@ -146,6 +146,10 @@ quda::mgarray<QudaFieldLocation> setup_location = {};
 
 quda::mgarray<int> nu_pre = {};
 quda::mgarray<int> nu_post = {};
+quda::mgarray<bool> mg_symmetric_gs = {};
+quda::mgarray<bool> mg_gs_linear = {};
+quda::mgarray<bool> mg_coarse_chebyshev = {};
+quda::mgarray<int> mg_coarse_chebyshev_degree = {};
 quda::mgarray<int> n_block_ortho = {};
 quda::mgarray<bool> block_ortho_two_pass = {};
 quda::mgarray<double> mu_factor = {};
@@ -1074,6 +1078,21 @@ void add_multigrid_option_group(std::shared_ptr<QUDAApp> quda_app)
 
   quda_app->add_mgoption(opgroup, "--mg-smoother", smoother_type, solver_trans,
                          "The smoother to use for multigrid (default mr)");
+  quda_app->add_mgoption(
+    opgroup, "--mg-symmetric-gs", mg_symmetric_gs, CLI::Validator(),
+    "Use a symmetric Gauss-Seidel smoother (forward pre-sweeps, backward post-sweeps) on a given non-bottom level "
+    "instead of --mg-smoother (default false)");
+  quda_app->add_mgoption(
+    opgroup, "--mg-symmetric-gs-linear", mg_gs_linear, CLI::Validator(),
+    "Make the symmetric Gauss-Seidel smoother a fixed, linear, self-adjoint operator (fixed sweep count + fixed scalar "
+    "step) on a given level; when off (default) it uses standard minimal-residual relaxation with early exit");
+  quda_app->add_mgoption(
+    opgroup, "--mg-coarse-chebyshev", mg_coarse_chebyshev, CLI::Validator(),
+    "Replace the coarse solve on a given level with a fixed-degree Chebyshev iteration (bottom level only, default "
+    "false)");
+  quda_app->add_mgoption(
+    opgroup, "--mg-coarse-chebyshev-degree", mg_coarse_chebyshev_degree, CLI::PositiveNumber,
+    "Degree of the fixed Chebyshev coarse solve on a given level (0 = use nu_pre + nu_post, default 0)");
   quda_app->add_mgoption(opgroup, "--mg-smoother-ca-basis-type", smoother_solver_ca_basis,
                          CLI::QUDACheckedTransformer(ca_basis_map),
                          "The basis to use for CA solver smoothers in multigrid (default power)");

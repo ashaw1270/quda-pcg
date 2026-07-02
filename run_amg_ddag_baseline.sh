@@ -49,6 +49,28 @@ MG_EXTRA="${MG_EXTRA:---mg-smoother 0 cg --mg-smoother 1 cg \
 --mg-setup-inv 0 cg --mg-nvec 0 24 --mg-block-size 0 4 4 4 4 \
 --mg-nu-pre 0 0 --mg-nu-post 0 4}"
 
+# Optional symmetrization of the AMG preconditioner (set MG_EXTRA to enable).
+# Use matched --mg-nu-pre/--mg-nu-post for the best symmetry.
+#
+# --mg-symmetric-gs enables Gauss-Seidel smoothing, but by default it uses
+# standard (non-linear) minimal-residual relaxation.  Add
+# --mg-symmetric-gs-linear to make the smoother a fixed, linear, self-adjoint
+# operator, which is what actually keeps the preconditioner Hermitian.
+#
+# Symmetric Gauss-Seidel fine smoother only (linear/Hermitian):
+#   MG_EXTRA="--mg-symmetric-gs 0 on --mg-symmetric-gs-linear 0 on \
+#     --mg-nu-pre 0 2 --mg-nu-post 0 2"
+#
+# Fixed-degree Chebyshev coarse solve only:
+#   MG_EXTRA="--mg-coarse-chebyshev 1 on --mg-coarse-chebyshev-degree 1 8 \
+#     --mg-coarse-solver-cheby-basis-eig-min 1 1e-2 --mg-coarse-solver-cheby-basis-eig-max 1 10"
+#
+# Both together (fully symmetric V-cycle):
+#   MG_EXTRA="--mg-symmetric-gs 0 on --mg-symmetric-gs-linear 0 on \
+#     --mg-nu-pre 0 2 --mg-nu-post 0 2 \
+#     --mg-coarse-chebyshev 1 on --mg-coarse-chebyshev-degree 1 8 \
+#     --mg-coarse-solver-cheby-basis-eig-min 1 1e-2 --mg-coarse-solver-cheby-basis-eig-max 1 10"
+
 MODEL_NAME="${MODEL_NAME:-AMG}"
 GAUGE_DIR="${GAUGE_DIR:-${BASE_DIR}/gauges}"
 METRICS_CSV="${METRICS_CSV:-/lcrc/project/NeuPreCon/shawa/ExperimentLogs/test_metrics.csv}"

@@ -95,6 +95,14 @@ namespace quda {
       report("MR");
       solver = new MR(mat, matSloppy, param);
       break;
+    case QUDA_GS_INVERTER:
+      report("Gauss-Seidel");
+      solver = new GaussSeidel(mat, matSloppy, param);
+      break;
+    case QUDA_CHEBYSHEV_INVERTER:
+      report("Chebyshev");
+      solver = new ChebyshevIter(mat, matSloppy, matEig, param);
+      break;
     case QUDA_SD_INVERTER:
       report("SD");
       solver = new SD(mat, param);

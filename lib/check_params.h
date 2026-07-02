@@ -966,6 +966,14 @@ void printQudaMultigridParam(QudaMultigridParam *param) {
     P(smoother_schwarz_cycle[i], INVALID_INT);
 #endif
 
+    // Optional symmetrization controls (default off); not required to be set.
+#ifndef CHECK_PARAM
+    P(smoother_symmetric_gs[i], QUDA_BOOLEAN_FALSE);
+    P(smoother_gs_linear[i], QUDA_BOOLEAN_FALSE);
+    P(coarse_fixed_chebyshev[i], QUDA_BOOLEAN_FALSE);
+    P(coarse_chebyshev_degree[i], 0);
+#endif
+
     // these parameters are not set for the bottom grid
     if (i<n_level-1) {
       for (int j=0; j<4; j++) P(geo_block_size[i][j], INVALID_INT);

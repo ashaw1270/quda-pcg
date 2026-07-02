@@ -201,6 +201,17 @@ namespace quda {
     /** Relaxation parameter used in GCR-DD (default = 1.0) */
     double omega = 0.0;
 
+    /** Sweep ordering for the Gauss-Seidel smoother (forward for a pre-smoother,
+        backward for a post-smoother) */
+    QudaGaussSeidelOrder gs_order = QUDA_GS_FORWARD_ORDER;
+
+    /** Whether the Gauss-Seidel smoother uses the fixed, input-independent
+        relaxation (fixed sweep count + fixed scalar step) that makes it a linear,
+        self-adjoint operator.  When false, standard practice is used instead: a
+        dynamically computed minimal-residual step with tolerance-based early
+        exit. */
+    bool gs_linear = false;
+
     /** Basis for CA algorithms */
     QudaCABasis ca_basis = QUDA_INVALID_BASIS;
 
@@ -1198,6 +1209,80 @@ namespace quda {
     virtual bool hermitian() const override { return false; } /** MR is for any linear system */
 
     virtual QudaInverterType getInverterType() const final { return QUDA_MR_INVERTER; }
+  };
+
+  /**
+     @brief Red-black (checkerboard) Gauss-Seidel relaxation, intended for use as
+     a multigrid smoother on a Hermitian operator (e.g. the normal operator
+     D†D).  Each sweep updates one checkerboard then the other using the
+     current residual.  A forward sweep updates even-before-odd; a backward sweep
+     updates odd-before-even.
+
+     Two relaxation modes are supported, selected by SolverParam::gs_linear:
+     - gs_linear == true: a fixed number of sweeps (maxiter) with a fixed scalar
+       step omega/lambda_max.  Because the coefficients do not depend on the
+       right-hand side, the map is linear; a forward pre-smoother paired with a
+       backward post-smoother (matched sweep counts) is self-adjoint, which is
+       required to keep the AMG preconditioner Hermitian.
+     - gs_linear == false (default): standard practice, i.e. a dynamically
+       computed minimal-residual step per colored sweep with tolerance-based
+       early exit.  This is generally non-linear.
+   */
+  class GaussSeidel : public Solver
+  {
+  private:
+    std::vector<ColorSpinorField> r;
+    std::vector<ColorSpinorField> d;  //!< colored search direction (non-linear path only)
+    std::vector<ColorSpinorField> Ad; //!< mat applied to d (non-linear path only)
+    bool init = false;
+    double diag_inv = 0.0; //!< reciprocal of the scalar diagonal estimate of mat (linear path only)
+
+    void create(cvector_ref<ColorSpinorField> &x, cvector_ref<const ColorSpinorField> &b);
+
+  public:
+    GaussSeidel(const DiracMatrix &mat, const DiracMatrix &matSloppy, SolverParam &param);
+
+    void operator()(cvector_ref<ColorSpinorField> &out, cvector_ref<const ColorSpinorField> &in) override;
+
+    cvector_ref<const ColorSpinorField> get_residual() override;
+
+    /** A single-direction sweep is not itself Hermitian (symmetry comes from
+        pairing a forward pre-smoother with a backward post-smoother). */
+    virtual bool hermitian() const override { return false; }
+
+    virtual QudaInverterType getInverterType() const final { return QUDA_GS_INVERTER; }
+  };
+
+  /**
+     @brief Fixed-degree Chebyshev iteration approximating mat^{-1} b as a fixed
+     polynomial p_K(mat) b whose coefficients depend only on the spectral bounds
+     [lambda_min, lambda_max] and the degree K (SolverParam::maxiter).  Unlike a
+     Krylov solve, the polynomial is independent of the right-hand side, so the
+     map is linear and, for a Hermitian operator, self-adjoint.  This makes it a
+     drop-in symmetric replacement for the early-stopping CG coarse solve.
+   */
+  class ChebyshevIter : public Solver
+  {
+  private:
+    std::vector<ColorSpinorField> r;
+    std::vector<ColorSpinorField> p;
+    bool init = false;
+    double lambda_min = 0.0;
+    double lambda_max = 0.0;
+
+    void create(cvector_ref<ColorSpinorField> &x, cvector_ref<const ColorSpinorField> &b);
+
+  public:
+    ChebyshevIter(const DiracMatrix &mat, const DiracMatrix &matSloppy, const DiracMatrix &matEig, SolverParam &param);
+
+    void operator()(cvector_ref<ColorSpinorField> &out, cvector_ref<const ColorSpinorField> &in) override;
+
+    cvector_ref<const ColorSpinorField> get_residual() override;
+
+    /** A fixed-degree polynomial in a Hermitian operator is Hermitian. */
+    virtual bool hermitian() const override { return true; }
+
+    virtual QudaInverterType getInverterType() const final { return QUDA_CHEBYSHEV_INVERTER; }
   };
 
   /**

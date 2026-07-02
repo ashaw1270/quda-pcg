@@ -321,6 +321,36 @@ namespace quda
     // inner solver should recompute the true residual after each cycle if using Schwarz preconditioning
     param_presmooth->compute_true_res = (param_presmooth->schwarz_type != QUDA_INVALID_SCHWARZ) ? true : false;
 
+    // Optional symmetrization overrides. These only take
+    // effect on the appropriate level, and leave the default smoother path
+    // byte-for-byte unchanged when the flags are off.
+    const bool use_symmetric_gs
+      = param.mg_global.smoother_symmetric_gs[param.level] == QUDA_BOOLEAN_TRUE && param.level < param.Nlevel - 1;
+    const bool use_coarse_chebyshev
+      = param.mg_global.coarse_fixed_chebyshev[param.level] == QUDA_BOOLEAN_TRUE && param.level == param.Nlevel - 1;
+
+    if (use_symmetric_gs) {
+      // Forward Gauss-Seidel pre-smoother; the post-smoother below uses the
+      // backward sweep so that the two together form a self-adjoint smoother.
+      logQuda(QUDA_VERBOSE, "Overriding level %d smoother with forward Gauss-Seidel\n", param.level);
+      param_presmooth->inv_type = QUDA_GS_INVERTER;
+      param_presmooth->gs_order = QUDA_GS_FORWARD_ORDER;
+      // Opt-in fixed/linear relaxation (fixed sweep count + fixed scalar step);
+      // otherwise the GS smoother uses standard minimal-residual relaxation.
+      param_presmooth -> gs_linear = (param.mg_global.smoother_gs_linear[param.level] == QUDA_BOOLEAN_TRUE);
+    } else if (use_coarse_chebyshev) {
+      // Fixed-degree Chebyshev coarse solve replacing the early-stopping CG.
+      int degree = param.mg_global.coarse_chebyshev_degree[param.level];
+      if (degree <= 0) degree = param.nu_pre + param.nu_post;
+      logQuda(QUDA_VERBOSE, "Overriding level %d coarse solve with degree-%d fixed Chebyshev\n", param.level, degree);
+      param_presmooth->inv_type = QUDA_CHEBYSHEV_INVERTER;
+      param_presmooth->maxiter = degree;
+      param_presmooth->Nkrylov = degree;
+      param_presmooth->pipeline = degree;
+      param_presmooth->ca_lambda_min = param.mg_global.coarse_solver_ca_lambda_min[param.level];
+      param_presmooth->ca_lambda_max = param.mg_global.coarse_solver_ca_lambda_max[param.level];
+    }
+
     presmoother = ((param.level < param.Nlevel - 1 || param_presmooth->schwarz_type != QUDA_INVALID_SCHWARZ)
                    && param_presmooth->inv_type != QUDA_INVALID_INVERTER && param_presmooth->maxiter > 0) ?
       Solver::create(*param_presmooth, *param.matSmooth, *param.matSmoothSloppy, *param.matSmoothSloppy,
@@ -334,6 +364,10 @@ namespace quda
       param_postsmooth->maxiter = param.nu_post;
       param_postsmooth->Nkrylov = param_postsmooth->maxiter;
       param_postsmooth->pipeline = param_postsmooth->maxiter;
+
+      // pair the forward pre-smoother with a backward post-smoother so the
+      // combined smoother is self-adjoint
+      if (use_symmetric_gs) param_postsmooth->gs_order = QUDA_GS_BACKWARD_ORDER;
 
       // we never need to compute the true residual for a post smoother
       param_postsmooth->compute_true_res = false;

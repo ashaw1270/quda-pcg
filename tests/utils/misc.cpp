@@ -367,6 +367,8 @@ const char *get_solver_str(QudaInverterType type)
   case QUDA_CA_CGNE_INVERTER: ret = "ca_cgne"; break;
   case QUDA_CA_CGNR_INVERTER: ret = "ca_cgnr"; break;
   case QUDA_CA_GCR_INVERTER: ret = "ca_gcr"; break;
+  case QUDA_GS_INVERTER: ret = "gs"; break;
+  case QUDA_CHEBYSHEV_INVERTER: ret = "chebyshev"; break;
   default:
     ret = "unknown";
     errorQuda("Error: invalid solver type %d\n", type);

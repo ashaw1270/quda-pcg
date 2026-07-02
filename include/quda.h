@@ -740,6 +740,30 @@ extern "C" {
     /** Number of post-smoother applications on each level */
     int nu_post[QUDA_MAX_MG_LEVEL];
 
+    /** Whether to use a symmetric Gauss-Seidel smoother (forward pre-sweeps,
+        backward post-sweeps) on each non-bottom level instead of the smoother
+        selected by smoother[].  Opt-in; default QUDA_BOOLEAN_FALSE preserves the
+        existing behavior. */
+    QudaBoolean smoother_symmetric_gs[QUDA_MAX_MG_LEVEL];
+
+    /** Whether the symmetric Gauss-Seidel smoother should use the fixed,
+        input-independent relaxation (a fixed number of sweeps with a fixed
+        scalar step) that makes the smoother a linear, self-adjoint operator.
+        Only consulted when smoother_symmetric_gs[] is set on that level.  When
+        QUDA_BOOLEAN_FALSE (default), the smoother uses standard practice
+        instead: a dynamically computed minimal-residual step and tolerance-based
+        early exit (which is generally non-linear). */
+    QudaBoolean smoother_gs_linear[QUDA_MAX_MG_LEVEL];
+
+    /** Whether to replace the (early-stopping) coarse solve on each level with a
+        fixed-degree Chebyshev iteration.  Only consulted on the bottom level.
+        Opt-in; default QUDA_BOOLEAN_FALSE preserves the existing behavior. */
+    QudaBoolean coarse_fixed_chebyshev[QUDA_MAX_MG_LEVEL];
+
+    /** Degree of the fixed Chebyshev coarse solve on each level.  A value <= 0
+        falls back to nu_pre + nu_post on the bottom level. */
+    int coarse_chebyshev_degree[QUDA_MAX_MG_LEVEL];
+
     /** Basis to use for CA smoother solvers */
     QudaCABasis smoother_solver_ca_basis[QUDA_MAX_MG_LEVEL];
 
