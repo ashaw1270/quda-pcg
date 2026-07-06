@@ -170,6 +170,12 @@ if(QUDA_MULTIGRID)
   quda_checkbuildtest(amg_pcg_ddag_baseline QUDA_BUILD_ALL_TESTS)
   install(TARGETS amg_pcg_ddag_baseline ${QUDA_EXCLUDE_FROM_INSTALL} DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+  # Dense materialization of the AMG preconditioner (symmetry / eig-compare tests)
+  add_executable(amg_materialize_minv amg_materialize_minv.cpp)
+  target_link_libraries(amg_materialize_minv ${TEST_LIBS})
+  quda_checkbuildtest(amg_materialize_minv QUDA_BUILD_ALL_TESTS)
+  install(TARGETS amg_materialize_minv ${QUDA_EXCLUDE_FROM_INSTALL} DESTINATION ${CMAKE_INSTALL_BINDIR})
+
 endif()
 
 if(QUDA_BUILD_NATIVE_LAPACK)
