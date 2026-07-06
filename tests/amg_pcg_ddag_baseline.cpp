@@ -24,7 +24,7 @@
 // --baseline-num-rhs random right-hand sides reusing that hierarchy, timing
 // each solve. A per-model CSV (--baseline-per-model-csv) holds one setup row
 // plus one row per RHS; a shared aggregate CSV (--baseline-aggregate-csv) holds
-// one averaged row per model mirroring the neural side's schema.
+// one averaged row per run mirroring the neural side's schema.
 
 #include <cmath>
 #include <cstdio>
@@ -160,35 +160,17 @@ static void append_rhs_row(const std::string &csv_path, int L, int sample, int r
   fclose(f);
 }
 
-// Append or replace this model's single averaged row in the shared aggregate
-// CSV. Existing rows for other models are preserved; any prior row for this
-// model is dropped so each model contributes exactly one up-to-date row.
-static void update_aggregate_csv(const std::string &csv_path, int L, double avg_iters, double setup_cost_s,
+// Append one averaged row to the shared aggregate CSV.
+static void append_aggregate_csv(const std::string &csv_path, int L, double avg_iters, double setup_cost_s,
                                  double rhs_cost_s, double warmup_s, double avg_final_resid, double frac_converged)
 {
   static const char *header =
     "timestamp,model,L,beta,kappa,rng,iters,warmup_s,setup_cost_s,total_init_s,RHS_cost_s,final_resid,converged %\n";
 
-  std::vector<std::string> kept;
+  bool write_header = true;
   {
     std::ifstream in(csv_path);
-    if (in) {
-      std::string line;
-      bool first = true;
-      while (std::getline(in, line)) {
-        if (first) { // skip existing header
-          first = false;
-          continue;
-        }
-        if (line.empty()) continue;
-        std::string field; // parse the model column (2nd field)
-        std::stringstream ss(line);
-        std::string ts, model;
-        std::getline(ss, ts, ',');
-        std::getline(ss, model, ',');
-        if (model != baseline_model_name) kept.push_back(line);
-      }
-    }
+    if (in && in.peek() != std::ifstream::traits_type::eof()) write_header = false;
   }
 
   const std::string warm_s = format_metric_str(warmup_s);
@@ -198,10 +180,9 @@ static void update_aggregate_csv(const std::string &csv_path, int L, double avg_
   const std::string resid_s = format_metric_str(avg_final_resid);
   const std::string conv_s = format_metric_str(frac_converged * 100.0);
 
-  FILE *f = fopen(csv_path.c_str(), "w");
+  FILE *f = fopen(csv_path.c_str(), write_header ? "w" : "a");
   if (!f) errorQuda("Could not open aggregate CSV %s for write", csv_path.c_str());
-  fputs(header, f);
-  for (const auto &line : kept) fprintf(f, "%s\n", line.c_str());
+  if (write_header) fputs(header, f);
   fprintf(f, "%s,%s,%d,%g,%g,%d,%.4f,%s,%s,%s,%s,%s,%s\n", iso_timestamp().c_str(), baseline_model_name.c_str(), L,
           baseline_beta, kappa, baseline_rng, avg_iters, warm_s.c_str(), setup_s.c_str(), total_s.c_str(),
           rhs_s.c_str(), resid_s.c_str(), conv_s.c_str());
@@ -238,7 +219,7 @@ int main(int argc, char **argv)
   app->add_option("--baseline-per-model-csv", baseline_per_model_csv,
                   "Per-model CSV path (one setup row + num-rhs solve rows per gauge)");
   app->add_option("--baseline-aggregate-csv", baseline_aggregate_csv,
-                  "Shared aggregate CSV path (one averaged row per model)");
+                  "Shared aggregate CSV path (one averaged row appended per run)");
   app->add_option("--baseline-model-name", baseline_model_name, "Value written to the CSV 'model' column");
   app->add_option("--baseline-beta", baseline_beta, "Gauge coupling beta tag for the CSV");
   app->add_option("--baseline-rng", baseline_rng, "rng tag of the source .dat for the CSV");
@@ -492,10 +473,10 @@ int main(int argc, char **argv)
   const double avg_resid = n_rhs_total > 0 ? sum_resid / n_rhs_total : 0.0;
   const double frac_converged = n_rhs_total > 0 ? sum_converged / n_rhs_total : 0.0;
 
-  update_aggregate_csv(baseline_aggregate_csv, L, avg_iters, avg_setup, avg_rhs_time, avg_warmup, avg_resid,
+  append_aggregate_csv(baseline_aggregate_csv, L, avg_iters, avg_setup, avg_rhs_time, avg_warmup, avg_resid,
                        frac_converged);
 
-  printfQuda("\nWrote %d setup + %ld rhs row(s) to %s; updated aggregate row in %s\n", n_configs, n_rhs_total,
+  printfQuda("\nWrote %d setup + %ld rhs row(s) to %s; appended aggregate row to %s\n", n_configs, n_rhs_total,
              baseline_per_model_csv.c_str(), baseline_aggregate_csv.c_str());
 
   freeGaugeQuda();
