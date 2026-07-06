@@ -16,9 +16,17 @@
 // A = D^dag D is never formed: it is applied matrix-free as two Wilson-Dirac
 // matvecs via Dirac::MdagM, and b = D^dag psi via Dirac::Mdag.  The PCG loop
 // mirrors MatrixPreNet/src/utils/solver.py (zero initial guess, z = M(r),
-// relative residual ||r|| / ||b||) and logs the same CSV schema as
-// ExperimentLogs/test_metrics.csv.
+// relative residual ||r|| / ||b||).
+//
+// Timing is setup-inclusive and fair vs the neural preconditioners: per gauge
+// config it records the AMG hierarchy build cost (setup_cost_s) and the
+// one-time QUDA autotuning cost (warmup_s) separately, then solves
+// --baseline-num-rhs random right-hand sides reusing that hierarchy, timing
+// each solve. A per-model CSV (--baseline-per-model-csv) holds one setup row
+// plus one row per RHS; a shared aggregate CSV (--baseline-aggregate-csv) holds
+// one averaged row per model mirroring the neural side's schema.
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -27,6 +35,8 @@
 #include <chrono>
 #include <string>
 #include <vector>
+#include <fstream>
+#include <sstream>
 
 #include <quda.h>
 #include <color_spinor_field.h>
@@ -54,11 +64,13 @@ std::array<void *, 4> gauge;
 
 // ---- baseline-specific command line options ------------------------------
 std::vector<std::string> baseline_gauge_files;
-std::string baseline_metrics_csv = "test_metrics.csv";
-std::string baseline_model_name = "AMG-DdagD";
+std::string baseline_per_model_csv = "per_model_metrics.csv";
+std::string baseline_aggregate_csv = "aggregate_test_metrics.csv";
+std::string baseline_model_name = "AMG";
 double baseline_beta = 5.5;
 int baseline_rng = 0;
 int baseline_sample_base = 0;
+int baseline_num_rhs = 20;
 unsigned long baseline_seed = 1234UL;
 
 static void load_gauge_binary(const std::string &path)
@@ -87,19 +99,112 @@ static std::string iso_timestamp()
   return std::string(buf);
 }
 
-static void append_metrics_row(const std::string &csv_path, int L, int sample, int iters, double elapsed_s,
-                               double final_resid, bool converged)
+static double round_4sig(double x)
 {
-  bool exists = false;
-  if (FILE *f = fopen(csv_path.c_str(), "r")) {
-    exists = true;
-    fclose(f);
-  }
+  if (x == 0.0 || !std::isfinite(x)) return x;
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "%.4g", x);
+  return std::strtod(buf, nullptr);
+}
+
+static std::string format_metric_str(double x)
+{
+  const double r4dp = std::round(x * 10000.0) / 10000.0;
+  const double r4sig = round_4sig(x);
+  char buf[64];
+  if (std::abs(x - r4dp) <= std::abs(x - r4sig))
+    std::snprintf(buf, sizeof(buf), "%.4f", r4dp);
+  else
+    std::snprintf(buf, sizeof(buf), "%.4g", r4sig);
+  return std::string(buf);
+}
+
+static const char *PER_MODEL_HEADER =
+  "timestamp,model,L,beta,kappa,rng,sample,phase,rhs_idx,elapsed_s,warmup_s,iters,final_resid,converged\n";
+
+// Truncate the per-model CSV and write its header so each run regenerates it.
+static void init_per_model_csv(const std::string &csv_path)
+{
+  FILE *f = fopen(csv_path.c_str(), "w");
+  if (!f) errorQuda("Could not open per-model CSV %s for write", csv_path.c_str());
+  fputs(PER_MODEL_HEADER, f);
+  fclose(f);
+}
+
+// One setup row per gauge: elapsed_s = setup (AMG hierarchy build) cost,
+// warmup_s = one-time QUDA autotuning; the rhs_idx/iters/resid/converged
+// columns are left blank.
+static void append_setup_row(const std::string &csv_path, int L, int sample, double setup_cost_s, double warmup_s)
+{
+  const std::string setup_s = format_metric_str(setup_cost_s);
+  const std::string warm_s = format_metric_str(warmup_s);
   FILE *f = fopen(csv_path.c_str(), "a");
-  if (!f) errorQuda("Could not open metrics CSV %s for append", csv_path.c_str());
-  if (!exists) fprintf(f, "timestamp,model,L,beta,kappa,rng,sample,iters,elapsed_s,final_resid,converged\n");
-  fprintf(f, "%s,%s,%d,%g,%g,%d,%d,%d,%.4f,%.17g,%s\n", iso_timestamp().c_str(), baseline_model_name.c_str(), L,
-          baseline_beta, kappa, baseline_rng, sample, iters, elapsed_s, final_resid, converged ? "True" : "False");
+  if (!f) errorQuda("Could not open per-model CSV %s for append", csv_path.c_str());
+  fprintf(f, "%s,%s,%d,%g,%g,%d,%d,setup,,%s,%s,,,\n", iso_timestamp().c_str(), baseline_model_name.c_str(), L,
+          baseline_beta, kappa, baseline_rng, sample, setup_s.c_str(), warm_s.c_str());
+  fclose(f);
+}
+
+// One row per solved right-hand side: elapsed_s = solve time; the warmup_s
+// column is left blank.
+static void append_rhs_row(const std::string &csv_path, int L, int sample, int rhs_idx, double elapsed_s, int iters,
+                           double final_resid, bool converged)
+{
+  const std::string elapsed = format_metric_str(elapsed_s);
+  const std::string resid = format_metric_str(final_resid);
+  FILE *f = fopen(csv_path.c_str(), "a");
+  if (!f) errorQuda("Could not open per-model CSV %s for append", csv_path.c_str());
+  fprintf(f, "%s,%s,%d,%g,%g,%d,%d,rhs,%d,%s,,%d,%s,%s\n", iso_timestamp().c_str(), baseline_model_name.c_str(), L,
+          baseline_beta, kappa, baseline_rng, sample, rhs_idx, elapsed.c_str(), iters, resid.c_str(),
+          converged ? "True" : "False");
+  fclose(f);
+}
+
+// Append or replace this model's single averaged row in the shared aggregate
+// CSV. Existing rows for other models are preserved; any prior row for this
+// model is dropped so each model contributes exactly one up-to-date row.
+static void update_aggregate_csv(const std::string &csv_path, int L, double avg_iters, double setup_cost_s,
+                                 double rhs_cost_s, double warmup_s, double avg_final_resid, double frac_converged)
+{
+  static const char *header =
+    "timestamp,model,L,beta,kappa,rng,iters,warmup_s,setup_cost_s,total_init_s,RHS_cost_s,final_resid,converged %\n";
+
+  std::vector<std::string> kept;
+  {
+    std::ifstream in(csv_path);
+    if (in) {
+      std::string line;
+      bool first = true;
+      while (std::getline(in, line)) {
+        if (first) { // skip existing header
+          first = false;
+          continue;
+        }
+        if (line.empty()) continue;
+        std::string field; // parse the model column (2nd field)
+        std::stringstream ss(line);
+        std::string ts, model;
+        std::getline(ss, ts, ',');
+        std::getline(ss, model, ',');
+        if (model != baseline_model_name) kept.push_back(line);
+      }
+    }
+  }
+
+  const std::string warm_s = format_metric_str(warmup_s);
+  const std::string setup_s = format_metric_str(setup_cost_s);
+  const std::string total_s = format_metric_str(setup_cost_s + warmup_s);
+  const std::string rhs_s = format_metric_str(rhs_cost_s);
+  const std::string resid_s = format_metric_str(avg_final_resid);
+  const std::string conv_s = format_metric_str(frac_converged * 100.0);
+
+  FILE *f = fopen(csv_path.c_str(), "w");
+  if (!f) errorQuda("Could not open aggregate CSV %s for write", csv_path.c_str());
+  fputs(header, f);
+  for (const auto &line : kept) fprintf(f, "%s\n", line.c_str());
+  fprintf(f, "%s,%s,%d,%g,%g,%d,%.4f,%s,%s,%s,%s,%s,%s\n", iso_timestamp().c_str(), baseline_model_name.c_str(), L,
+          baseline_beta, kappa, baseline_rng, avg_iters, warm_s.c_str(), setup_s.c_str(), total_s.c_str(),
+          rhs_s.c_str(), resid_s.c_str(), conv_s.c_str());
   fclose(f);
 }
 
@@ -130,11 +235,15 @@ int main(int argc, char **argv)
 
   app->add_option("--baseline-gauge-file", baseline_gauge_files,
                   "Gauge configuration binary in QUDA QDP even-odd order (repeatable; one per config)");
-  app->add_option("--baseline-metrics-csv", baseline_metrics_csv, "Path to append metric rows to");
+  app->add_option("--baseline-per-model-csv", baseline_per_model_csv,
+                  "Per-model CSV path (one setup row + num-rhs solve rows per gauge)");
+  app->add_option("--baseline-aggregate-csv", baseline_aggregate_csv,
+                  "Shared aggregate CSV path (one averaged row per model)");
   app->add_option("--baseline-model-name", baseline_model_name, "Value written to the CSV 'model' column");
   app->add_option("--baseline-beta", baseline_beta, "Gauge coupling beta tag for the CSV");
   app->add_option("--baseline-rng", baseline_rng, "rng tag of the source .dat for the CSV");
   app->add_option("--baseline-sample-base", baseline_sample_base, "CSV 'sample' index of the first gauge config");
+  app->add_option("--baseline-num-rhs", baseline_num_rhs, "Number of random RHS solved per gauge config");
   app->add_option("--baseline-seed", baseline_seed, "Seed for the random Gaussian sources");
 
   try {
@@ -203,8 +312,16 @@ int main(int argc, char **argv)
 
   initQuda(device_ordinal);
 
-  printfQuda("Galerkin-AMG PCG baseline (A = D^dag D): %zu config(s), L=%d, kappa=%g, tol=%g, maxiter=%d\n",
-             baseline_gauge_files.size(), L, kappa, tol, niter);
+  printfQuda("Galerkin-AMG PCG baseline (A = D^dag D): %zu config(s), L=%d, kappa=%g, tol=%g, maxiter=%d, num_rhs=%d\n",
+             baseline_gauge_files.size(), L, kappa, tol, niter, baseline_num_rhs);
+
+  init_per_model_csv(baseline_per_model_csv);
+
+  // Accumulators for the aggregate row: setup/warmup are per gauge config; the
+  // solve metrics are averaged over every right-hand side across all configs.
+  double sum_setup_s = 0.0, sum_warmup_s = 0.0;
+  double sum_rhs_time = 0.0, sum_iters = 0.0, sum_resid = 0.0, sum_converged = 0.0;
+  long n_rhs_total = 0;
 
   for (size_t c = 0; c < baseline_gauge_files.size(); c++) {
     const int sample = baseline_sample_base + (int)c;
@@ -222,14 +339,20 @@ int main(int argc, char **argv)
     // on A = D^dag D (M^{-1} = I). Validates the QUDA operator independent of MG.
     const bool no_precond = (getenv("AMG_NO_PRECOND") != nullptr);
 
-    // Build the Galerkin normal-operator AMG preconditioner.
+    // Build the Galerkin normal-operator AMG preconditioner. This hierarchy
+    // build is the algorithmic setup cost (analogous to the NN forward pass
+    // producing U_tilde on the neural side); time it as setup_cost_s.
     void *mg_handle = nullptr;
     quda::MG *mg_ptr = nullptr;
+    double setup_cost_s = 0.0;
     if (!no_precond) {
+      auto tset0 = std::chrono::high_resolution_clock::now();
       mg_handle = newMultigridQuda(&mg_param);
+      auto tset1 = std::chrono::high_resolution_clock::now();
+      setup_cost_s = std::chrono::duration<double>(tset1 - tset0).count();
       auto *mgs = static_cast<quda::multigrid_solver *>(mg_handle);
       mg_ptr = mgs->mg;
-      printfQuda("MG setup done: %g secs\n", mg_param.invert_param->secs);
+      printfQuda("MG setup done: %g secs (wall %.6f s)\n", mg_param.invert_param->secs, setup_cost_s);
     } else {
       printfQuda("AMG_NO_PRECOND set: running plain CG (M^{-1} = I) for operator validation.\n");
     }
@@ -268,9 +391,18 @@ int main(int argc, char **argv)
     quda::RNG rng(psi, baseline_seed + (unsigned long)c);
     spinorNoise(psi, rng, QUDA_NOISE_GAUSS);
 
-    // Warm up autotuning of the matvec and preconditioner outside the timed window.
+    // Warm up autotuning of the matvec and preconditioner outside the solve
+    // window. This one-time QUDA autotuning is logged separately as warmup_s
+    // (analogous to JAX JIT compilation) and excluded from setup_cost_s.
+    auto twarm0 = std::chrono::high_resolution_clock::now();
     dirac->MdagM(Ap, psi);
     apply_Minv(z, psi);
+    auto twarm1 = std::chrono::high_resolution_clock::now();
+    double warmup_s = std::chrono::duration<double>(twarm1 - twarm0).count();
+
+    append_setup_row(baseline_per_model_csv, L, sample, setup_cost_s, warmup_s);
+    sum_setup_s += setup_cost_s;
+    sum_warmup_s += warmup_s;
 
     // Diagnostic: how well does the V-cycle approximate (D^dag D)^{-1}?
     // Report ||(D^dag D)(mg r) - r|| / ||r|| for random r (single precision).
@@ -284,55 +416,67 @@ int main(int argc, char **argv)
     }
 
     // ---- PCG on A = D^dag D, mirroring MatrixPreNet solver.py --------------
-    auto t0 = std::chrono::high_resolution_clock::now();
-
-    dirac->Mdag(b, psi); // b = D^dag psi
-    const double b_norm = std::sqrt(quda::blas::norm2(b));
-
-    quda::blas::zero(x);
-    r = b; // r = b - A x, with x = 0
-    apply_Minv(z, r); // z = M^{-1} r
-    p = z;
-    double rz = quda::blas::cDotProduct(r, z).real();
-    double r_norm = std::sqrt(quda::blas::norm2(r));
-
-    int iters = 0;
-    double final_resid = r_norm / b_norm;
+    // The AMG hierarchy (mg_ptr) and Dirac operators are reused across every
+    // right-hand side; solving multiple RHS is what amortizes the setup cost.
     const double eps = tol;
+    for (int j = 0; j < baseline_num_rhs; j++) {
+      // Fresh random Gaussian source per RHS (advances the per-config RNG).
+      spinorNoise(psi, rng, QUDA_NOISE_GAUSS);
 
-    for (int k = 0; k < niter; k++) {
-      if (r_norm / b_norm < eps) break;
+      auto t0 = std::chrono::high_resolution_clock::now();
 
-      dirac->MdagM(Ap, p);
-      double pAp = quda::blas::cDotProduct(p, Ap).real();
-      double alpha = rz / pAp;
+      dirac->Mdag(b, psi); // b = D^dag psi
+      const double b_norm = std::sqrt(quda::blas::norm2(b));
 
-      axpy_(alpha, p, x);                                  // x += alpha p
-      double r2 = quda::blas::axpyNorm(-alpha, Ap, r);     // r -= alpha Ap; ||r||^2
-      r_norm = std::sqrt(r2);
+      quda::blas::zero(x);
+      r = b; // r = b - A x, with x = 0
+      apply_Minv(z, r); // z = M^{-1} r
+      p = z;
+      double rz = quda::blas::cDotProduct(r, z).real();
+      double r_norm = std::sqrt(quda::blas::norm2(r));
 
-      iters += 1;
-      final_resid = r_norm / b_norm;
+      int iters = 0;
+      double final_resid = r_norm / b_norm;
 
-      zsave = z;          // z_k (previous preconditioned residual)
-      apply_Minv(z, r);   // z_{k+1} = M^{-1} r_{k+1}
-      double rz_new = quda::blas::cDotProduct(r, z).real();
-      double rz_save = quda::blas::cDotProduct(r, zsave).real();
-      // Flexible (Polak-Ribiere) beta; reduces to standard PCG when M^{-1} is a
-      // fixed symmetric linear operator.
-      double beta = (rz_new - rz_save) / rz;
-      xpay_(z, beta, p); // p = z + beta p
-      rz = rz_new;
+      for (int k = 0; k < niter; k++) {
+        if (r_norm / b_norm < eps) break;
+
+        dirac->MdagM(Ap, p);
+        double pAp = quda::blas::cDotProduct(p, Ap).real();
+        double alpha = rz / pAp;
+
+        axpy_(alpha, p, x);                                  // x += alpha p
+        double r2 = quda::blas::axpyNorm(-alpha, Ap, r);     // r -= alpha Ap; ||r||^2
+        r_norm = std::sqrt(r2);
+
+        iters += 1;
+        final_resid = r_norm / b_norm;
+
+        zsave = z;          // z_k (previous preconditioned residual)
+        apply_Minv(z, r);   // z_{k+1} = M^{-1} r_{k+1}
+        double rz_new = quda::blas::cDotProduct(r, z).real();
+        double rz_save = quda::blas::cDotProduct(r, zsave).real();
+        // Flexible (Polak-Ribiere) beta; reduces to standard PCG when M^{-1} is
+        // a fixed symmetric linear operator.
+        double beta = (rz_new - rz_save) / rz;
+        xpay_(z, beta, p); // p = z + beta p
+        rz = rz_new;
+      }
+
+      auto t1 = std::chrono::high_resolution_clock::now();
+      double elapsed_s = std::chrono::duration<double>(t1 - t0).count();
+      bool converged = (iters > 0) && (final_resid < eps);
+
+      printfQuda("Result: rhs=%d iters=%d elapsed_s=%.4f final_resid=%.6e converged=%s\n", j, iters, elapsed_s,
+                 final_resid, converged ? "True" : "False");
+
+      append_rhs_row(baseline_per_model_csv, L, sample, j, elapsed_s, iters, final_resid, converged);
+      sum_rhs_time += elapsed_s;
+      sum_iters += iters;
+      sum_resid += final_resid;
+      sum_converged += converged ? 1.0 : 0.0;
+      n_rhs_total += 1;
     }
-
-    auto t1 = std::chrono::high_resolution_clock::now();
-    double elapsed_s = std::chrono::duration<double>(t1 - t0).count();
-    bool converged = (iters > 0) && (final_resid < eps);
-
-    printfQuda("Result: iters=%d elapsed_s=%.4f final_resid=%.6e converged=%s\n", iters, elapsed_s, final_resid,
-               converged ? "True" : "False");
-
-    append_metrics_row(baseline_metrics_csv, L, sample, iters, elapsed_s, final_resid, converged);
 
     delete dirac;
     delete diracSloppy;
@@ -340,7 +484,19 @@ int main(int argc, char **argv)
     if (mg_handle) destroyMultigridQuda(mg_handle);
   }
 
-  printfQuda("\nAppended %zu row(s) to %s\n", baseline_gauge_files.size(), baseline_metrics_csv.c_str());
+  const int n_configs = (int)baseline_gauge_files.size();
+  const double avg_setup = n_configs > 0 ? sum_setup_s / n_configs : 0.0;
+  const double avg_warmup = n_configs > 0 ? sum_warmup_s / n_configs : 0.0;
+  const double avg_rhs_time = n_rhs_total > 0 ? sum_rhs_time / n_rhs_total : 0.0;
+  const double avg_iters = n_rhs_total > 0 ? sum_iters / n_rhs_total : 0.0;
+  const double avg_resid = n_rhs_total > 0 ? sum_resid / n_rhs_total : 0.0;
+  const double frac_converged = n_rhs_total > 0 ? sum_converged / n_rhs_total : 0.0;
+
+  update_aggregate_csv(baseline_aggregate_csv, L, avg_iters, avg_setup, avg_rhs_time, avg_warmup, avg_resid,
+                       frac_converged);
+
+  printfQuda("\nWrote %d setup + %ld rhs row(s) to %s; updated aggregate row in %s\n", n_configs, n_rhs_total,
+             baseline_per_model_csv.c_str(), baseline_aggregate_csv.c_str());
 
   freeGaugeQuda();
   endQuda();

@@ -20,12 +20,14 @@
 #
 # Env knobs (with defaults):
 #   L, RNG, BETA, KAPPA, MG_LEVELS(=2), PREC, PREC_SLOPPY, PREC_PRECON,
-#   TOL, NITER, MODEL_NAME, METRICS_CSV, GAUGE_DIR, SEED, NCONFIG, MG_EXTRA
+#   TOL, NITER, NRHS(=20), NCONFIG(=20), MODEL_NAME, METRICS_ROOT, PER_MODEL_CSV,
+#   AGGREGATE_CSV, GAUGE_DIR, SEED, MG_EXTRA
+#   Set NCONFIG=0 to use every available converted gauge file.
 
 set -euo pipefail
 
 FORK_DIR="${FORK_DIR:-/lcrc/project/NeuPreCon/shawa/quda-pcg}"
-BASE_DIR="${BASE_DIR:-/lcrc/project/NeuPreCon/shawa/support-amg/quda_baseline}"
+BASE_DIR="${BASE_DIR:-/lcrc/project/NeuPreCon/shawa/MatrixPreNet/quda_baseline}"
 QUDA_BUILD="${QUDA_BUILD:-${FORK_DIR}/build-mg}"
 BIN="${BIN:-${QUDA_BUILD}/tests/amg_pcg_ddag_baseline}"
 
@@ -40,7 +42,8 @@ PREC_PRECON="${PREC_PRECON:-single}"
 TOL="${TOL:-1e-8}"
 NITER="${NITER:-300}"
 SEED="${SEED:-1234}"
-NCONFIG="${NCONFIG:-0}"                    # 0 = all configs; >0 limits for quick debugging
+NRHS="${NRHS:-20}"                         # random RHS solved per gauge config
+NCONFIG="${NCONFIG:-20}"                   # gauge configs to run; 0 = all available
 
 # D^dag D is Hermitian positive-definite, so use CG for the smoother, the coarse
 # solve and the null-space setup. Tunable via MG_EXTRA.
@@ -73,7 +76,10 @@ MG_EXTRA="${MG_EXTRA:---mg-smoother 0 cg --mg-smoother 1 cg \
 
 MODEL_NAME="${MODEL_NAME:-AMG}"
 GAUGE_DIR="${GAUGE_DIR:-${BASE_DIR}/gauges}"
-METRICS_CSV="${METRICS_CSV:-/lcrc/project/NeuPreCon/shawa/ExperimentLogs/test_metrics.csv}"
+METRICS_ROOT="${METRICS_ROOT:-/lcrc/project/NeuPreCon/shawa/ExperimentLogs}"
+PER_MODEL_CSV="${PER_MODEL_CSV:-${METRICS_ROOT}/per_model_metrics/${MODEL_NAME}.csv}"
+AGGREGATE_CSV="${AGGREGATE_CSV:-${METRICS_ROOT}/aggregate_test_metrics.csv}"
+mkdir -p "$(dirname "${PER_MODEL_CSV}")" "$(dirname "${AGGREGATE_CSV}")"
 
 echo "=== modules ==="
 module purge
@@ -112,13 +118,17 @@ set -x
   --verbosity verbose \
   ${MG_EXTRA} \
   "${GAUGE_ARGS[@]}" \
-  --baseline-metrics-csv "${METRICS_CSV}" \
+  --baseline-per-model-csv "${PER_MODEL_CSV}" \
+  --baseline-aggregate-csv "${AGGREGATE_CSV}" \
   --baseline-model-name "${MODEL_NAME}" \
   --baseline-beta "${BETA}" \
   --baseline-rng "${RNG}" \
   --baseline-sample-base 0 \
+  --baseline-num-rhs "${NRHS}" \
   --baseline-seed "${SEED}"
 set +x
 
-echo "=== done; metrics appended to ${METRICS_CSV} ==="
-cat "${METRICS_CSV}" || true
+echo "=== done; per-model metrics written to ${PER_MODEL_CSV} ==="
+cat "${PER_MODEL_CSV}" || true
+echo "=== aggregate row updated in ${AGGREGATE_CSV} ==="
+cat "${AGGREGATE_CSV}" || true
