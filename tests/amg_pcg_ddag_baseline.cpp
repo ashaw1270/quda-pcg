@@ -162,10 +162,11 @@ static void append_rhs_row(const std::string &csv_path, int L, int sample, int r
 
 // Append one averaged row to the shared aggregate CSV.
 static void append_aggregate_csv(const std::string &csv_path, int L, double avg_iters, double setup_cost_s,
-                                 double rhs_cost_s, double warmup_s, double avg_final_resid, double frac_converged)
+                                 double rhs_cost_s, double warmup_s, double total_test_s, double avg_final_resid,
+                                 double frac_converged)
 {
   static const char *header =
-    "timestamp,model,L,beta,kappa,rng,iters,warmup_s,setup_cost_s,total_init_s,RHS_cost_s,final_resid,converged %\n";
+    "timestamp,model,L,beta,kappa,rng,iters,warmup_s,setup_cost_s,total_init_s,RHS_cost_s,TOTAL_s,final_resid,converged %\n";
 
   bool write_header = true;
   {
@@ -177,15 +178,16 @@ static void append_aggregate_csv(const std::string &csv_path, int L, double avg_
   const std::string setup_s = format_metric_str(setup_cost_s);
   const std::string total_s = format_metric_str(setup_cost_s + warmup_s);
   const std::string rhs_s = format_metric_str(rhs_cost_s);
+  const std::string total_test_str = format_metric_str(total_test_s);
   const std::string resid_s = format_metric_str(avg_final_resid);
   const std::string conv_s = format_metric_str(frac_converged * 100.0);
 
   FILE *f = fopen(csv_path.c_str(), write_header ? "w" : "a");
   if (!f) errorQuda("Could not open aggregate CSV %s for write", csv_path.c_str());
   if (write_header) fputs(header, f);
-  fprintf(f, "%s,%s,%d,%g,%g,%d,%.4f,%s,%s,%s,%s,%s,%s\n", iso_timestamp().c_str(), baseline_model_name.c_str(), L,
+  fprintf(f, "%s,%s,%d,%g,%g,%d,%.4f,%s,%s,%s,%s,%s,%s,%s\n", iso_timestamp().c_str(), baseline_model_name.c_str(), L,
           baseline_beta, kappa, baseline_rng, avg_iters, warm_s.c_str(), setup_s.c_str(), total_s.c_str(),
-          rhs_s.c_str(), resid_s.c_str(), conv_s.c_str());
+          rhs_s.c_str(), total_test_str.c_str(), resid_s.c_str(), conv_s.c_str());
   fclose(f);
 }
 
@@ -303,6 +305,8 @@ int main(int argc, char **argv)
   double sum_setup_s = 0.0, sum_warmup_s = 0.0;
   double sum_rhs_time = 0.0, sum_iters = 0.0, sum_resid = 0.0, sum_converged = 0.0;
   long n_rhs_total = 0;
+  std::chrono::high_resolution_clock::time_point t_test_start{};
+  bool t_test_started = false;
 
   for (size_t c = 0; c < baseline_gauge_files.size(); c++) {
     const int sample = baseline_sample_base + (int)c;
@@ -376,6 +380,10 @@ int main(int argc, char **argv)
     // window. This one-time QUDA autotuning is logged separately as warmup_s
     // (analogous to JAX JIT compilation) and excluded from setup_cost_s.
     auto twarm0 = std::chrono::high_resolution_clock::now();
+    if (!t_test_started) {
+      t_test_start = twarm0;
+      t_test_started = true;
+    }
     dirac->MdagM(Ap, psi);
     apply_Minv(z, psi);
     auto twarm1 = std::chrono::high_resolution_clock::now();
@@ -472,9 +480,12 @@ int main(int argc, char **argv)
   const double avg_iters = n_rhs_total > 0 ? sum_iters / n_rhs_total : 0.0;
   const double avg_resid = n_rhs_total > 0 ? sum_resid / n_rhs_total : 0.0;
   const double frac_converged = n_rhs_total > 0 ? sum_converged / n_rhs_total : 0.0;
+  const auto t_test_end = std::chrono::high_resolution_clock::now();
+  const double total_test_s =
+    t_test_started ? std::chrono::duration<double>(t_test_end - t_test_start).count() : 0.0;
 
-  append_aggregate_csv(baseline_aggregate_csv, L, avg_iters, avg_setup, avg_rhs_time, avg_warmup, avg_resid,
-                       frac_converged);
+  append_aggregate_csv(baseline_aggregate_csv, L, avg_iters, avg_setup, avg_rhs_time, avg_warmup, total_test_s,
+                       avg_resid, frac_converged);
 
   printfQuda("\nWrote %d setup + %ld rhs row(s) to %s; appended aggregate row to %s\n", n_configs, n_rhs_total,
              baseline_per_model_csv.c_str(), baseline_aggregate_csv.c_str());
