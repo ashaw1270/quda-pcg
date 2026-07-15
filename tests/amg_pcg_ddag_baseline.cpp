@@ -20,11 +20,13 @@
 //
 // Timing is setup-inclusive and fair vs the neural preconditioners: per gauge
 // config it records the AMG hierarchy build cost (setup_cost_s) and the
-// one-time QUDA autotuning cost (warmup_s) separately, then solves
+// steady-state per-gauge framework cost (warmup_s) separately, then solves
 // --baseline-num-rhs random right-hand sides reusing that hierarchy, timing
-// each solve. A per-model CSV (--baseline-per-model-csv) holds one setup row
-// plus one row per RHS; a shared aggregate CSV (--baseline-aggregate-csv) holds
-// one averaged row per run mirroring the neural side's schema.
+// each solve. An untimed cold autotune (matvec + Minv + one throwaway solve)
+// on the first config is excluded from warmup_s / RHS / TOTAL metrics. A
+// per-model CSV (--baseline-per-model-csv) holds one setup row plus one row
+// per RHS; a shared aggregate CSV (--baseline-aggregate-csv) holds one averaged
+// row per run mirroring the neural side's schema.
 
 #include <cmath>
 #include <cstdio>
@@ -132,8 +134,8 @@ static void init_per_model_csv(const std::string &csv_path)
 }
 
 // One setup row per gauge: elapsed_s = setup (AMG hierarchy build) cost,
-// warmup_s = one-time QUDA autotuning; the rhs_idx/iters/resid/converged
-// columns are left blank.
+// warmup_s = steady-state per-gauge framework cost after cold autotune; the
+// rhs_idx/iters/resid/converged columns are left blank.
 static void append_setup_row(const std::string &csv_path, int L, int sample, double setup_cost_s, double warmup_s)
 {
   const std::string setup_s = format_metric_str(setup_cost_s);
@@ -307,6 +309,7 @@ int main(int argc, char **argv)
   long n_rhs_total = 0;
   std::chrono::high_resolution_clock::time_point t_test_start{};
   bool t_test_started = false;
+  bool did_cold_compile = false;
 
   for (size_t c = 0; c < baseline_gauge_files.size(); c++) {
     const int sample = baseline_sample_base + (int)c;
@@ -372,13 +375,70 @@ int main(int argc, char **argv)
       z_out = sz;         // single -> double
     };
 
+    // Flexible PCG on A = D^dag D with current psi as source. Returns
+    // (iters, final_resid). Uses fields already allocated above.
+    const double eps = tol;
+    auto run_pcg = [&](int &iters_out, double &final_resid_out) {
+      dirac->Mdag(b, psi); // b = D^dag psi
+      const double b_norm = std::sqrt(quda::blas::norm2(b));
+
+      quda::blas::zero(x);
+      r = b; // r = b - A x, with x = 0
+      apply_Minv(z, r); // z = M^{-1} r
+      p = z;
+      double rz = quda::blas::cDotProduct(r, z).real();
+      double r_norm = std::sqrt(quda::blas::norm2(r));
+
+      iters_out = 0;
+      final_resid_out = r_norm / b_norm;
+
+      for (int k = 0; k < niter; k++) {
+        if (r_norm / b_norm < eps) break;
+
+        dirac->MdagM(Ap, p);
+        double pAp = quda::blas::cDotProduct(p, Ap).real();
+        double alpha = rz / pAp;
+
+        axpy_(alpha, p, x);                                  // x += alpha p
+        double r2 = quda::blas::axpyNorm(-alpha, Ap, r);     // r -= alpha Ap; ||r||^2
+        r_norm = std::sqrt(r2);
+
+        iters_out += 1;
+        final_resid_out = r_norm / b_norm;
+
+        zsave = z;          // z_k (previous preconditioned residual)
+        apply_Minv(z, r);   // z_{k+1} = M^{-1} r_{k+1}
+        double rz_new = quda::blas::cDotProduct(r, z).real();
+        double rz_save = quda::blas::cDotProduct(r, zsave).real();
+        // Flexible (Polak-Ribiere) beta; reduces to standard PCG when M^{-1} is
+        // a fixed symmetric linear operator.
+        double beta = (rz_new - rz_save) / rz;
+        xpay_(z, beta, p); // p = z + beta p
+        rz = rz_new;
+      }
+    };
+
     // Random Gaussian source psi (reproducible per config).
     quda::RNG rng(psi, baseline_seed + (unsigned long)c);
+
+    // Untimed cold autotune on the first config only so warmup_s / first RHS
+    // reflect steady-state cost, not first-touch QUDA autotuning. Uses a
+    // separate RNG so the timed metrics stream is unchanged.
+    if (!did_cold_compile) {
+      printfQuda("Cold-autotuning QUDA kernels (excluded from metrics)...\n");
+      quda::RNG cold_rng(psi, baseline_seed ^ 0xC01DU);
+      spinorNoise(psi, cold_rng, QUDA_NOISE_GAUSS);
+      dirac->MdagM(Ap, psi);
+      apply_Minv(z, psi);
+      int discard_iters = 0;
+      double discard_resid = 0.0;
+      run_pcg(discard_iters, discard_resid);
+      did_cold_compile = true;
+    }
+
     spinorNoise(psi, rng, QUDA_NOISE_GAUSS);
 
-    // Warm up autotuning of the matvec and preconditioner outside the solve
-    // window. This one-time QUDA autotuning is logged separately as warmup_s
-    // (analogous to JAX JIT compilation) and excluded from setup_cost_s.
+    // Timed warmup: steady-state matvec + Minv cost after cold autotune.
     auto twarm0 = std::chrono::high_resolution_clock::now();
     if (!t_test_started) {
       t_test_start = twarm0;
@@ -407,51 +467,14 @@ int main(int argc, char **argv)
     // ---- PCG on A = D^dag D, mirroring MatrixPreNet solver.py --------------
     // The AMG hierarchy (mg_ptr) and Dirac operators are reused across every
     // right-hand side; solving multiple RHS is what amortizes the setup cost.
-    const double eps = tol;
     for (int j = 0; j < baseline_num_rhs; j++) {
       // Fresh random Gaussian source per RHS (advances the per-config RNG).
       spinorNoise(psi, rng, QUDA_NOISE_GAUSS);
 
       auto t0 = std::chrono::high_resolution_clock::now();
-
-      dirac->Mdag(b, psi); // b = D^dag psi
-      const double b_norm = std::sqrt(quda::blas::norm2(b));
-
-      quda::blas::zero(x);
-      r = b; // r = b - A x, with x = 0
-      apply_Minv(z, r); // z = M^{-1} r
-      p = z;
-      double rz = quda::blas::cDotProduct(r, z).real();
-      double r_norm = std::sqrt(quda::blas::norm2(r));
-
       int iters = 0;
-      double final_resid = r_norm / b_norm;
-
-      for (int k = 0; k < niter; k++) {
-        if (r_norm / b_norm < eps) break;
-
-        dirac->MdagM(Ap, p);
-        double pAp = quda::blas::cDotProduct(p, Ap).real();
-        double alpha = rz / pAp;
-
-        axpy_(alpha, p, x);                                  // x += alpha p
-        double r2 = quda::blas::axpyNorm(-alpha, Ap, r);     // r -= alpha Ap; ||r||^2
-        r_norm = std::sqrt(r2);
-
-        iters += 1;
-        final_resid = r_norm / b_norm;
-
-        zsave = z;          // z_k (previous preconditioned residual)
-        apply_Minv(z, r);   // z_{k+1} = M^{-1} r_{k+1}
-        double rz_new = quda::blas::cDotProduct(r, z).real();
-        double rz_save = quda::blas::cDotProduct(r, zsave).real();
-        // Flexible (Polak-Ribiere) beta; reduces to standard PCG when M^{-1} is
-        // a fixed symmetric linear operator.
-        double beta = (rz_new - rz_save) / rz;
-        xpay_(z, beta, p); // p = z + beta p
-        rz = rz_new;
-      }
-
+      double final_resid = 0.0;
+      run_pcg(iters, final_resid);
       auto t1 = std::chrono::high_resolution_clock::now();
       double elapsed_s = std::chrono::duration<double>(t1 - t0).count();
       bool converged = (iters > 0) && (final_resid < eps);
