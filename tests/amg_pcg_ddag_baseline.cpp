@@ -45,6 +45,7 @@
 #include <dirac_quda.h>
 #include <multigrid.h>
 #include <blas_quda.h>
+#include <tune_quda.h>
 
 #include "misc.h"
 #include "host_utils.h"
@@ -121,8 +122,15 @@ static std::string format_metric_str(double x)
   return std::string(buf);
 }
 
+// FLOP columns (raw integers) mirror the JAX per-model schema:
+// setup_flops / solve_flops are as-written (QUDA native flops_global deltas);
+// setup_flops_opnorm / solve_flops_opnorm are operator-normalized. QUDA already
+// uses the canonical spin-projected Dslash, so the _opnorm columns equal the
+// as-written columns (kept for schema alignment with the JAX writer).
 static const char *PER_MODEL_HEADER =
-  "timestamp,model,L,beta,kappa,rng,sample,phase,rhs_idx,elapsed_s,warmup_s,iters,final_resid,converged\n";
+  "timestamp,model,L,beta,kappa,rng,sample,phase,rhs_idx,"
+  "setup_flops,solve_flops,setup_flops_opnorm,solve_flops_opnorm,"
+  "elapsed_s,warmup_s,iters,final_resid,converged\n";
 
 // Truncate the per-model CSV and write its header so each run regenerates it.
 static void init_per_model_csv(const std::string &csv_path)
@@ -136,28 +144,35 @@ static void init_per_model_csv(const std::string &csv_path)
 // One setup row per gauge: elapsed_s = setup (AMG hierarchy build) cost,
 // warmup_s = steady-state per-gauge framework cost after cold autotune; the
 // rhs_idx/iters/resid/converged columns are left blank.
-static void append_setup_row(const std::string &csv_path, int L, int sample, double setup_cost_s, double warmup_s)
+static void append_setup_row(const std::string &csv_path, int L, int sample, double setup_cost_s, double warmup_s,
+                             uint64_t setup_flops)
 {
   const std::string setup_s = format_metric_str(setup_cost_s);
   const std::string warm_s = format_metric_str(warmup_s);
   FILE *f = fopen(csv_path.c_str(), "a");
   if (!f) errorQuda("Could not open per-model CSV %s for append", csv_path.c_str());
-  fprintf(f, "%s,%s,%d,%g,%g,%d,%d,setup,,%s,%s,,,\n", iso_timestamp().c_str(), baseline_model_name.c_str(), L,
-          baseline_beta, kappa, baseline_rng, sample, setup_s.c_str(), warm_s.c_str());
+  // ...,rhs_idx(blank), setup_flops, solve_flops(blank), setup_flops_opnorm,
+  // solve_flops_opnorm(blank), elapsed_s, warmup_s, iters/resid/converged(blank)
+  fprintf(f, "%s,%s,%d,%g,%g,%d,%d,setup,,%llu,,%llu,,%s,%s,,,\n", iso_timestamp().c_str(),
+          baseline_model_name.c_str(), L, baseline_beta, kappa, baseline_rng, sample,
+          (unsigned long long)setup_flops, (unsigned long long)setup_flops, setup_s.c_str(), warm_s.c_str());
   fclose(f);
 }
 
 // One row per solved right-hand side: elapsed_s = solve time; the warmup_s
 // column is left blank.
 static void append_rhs_row(const std::string &csv_path, int L, int sample, int rhs_idx, double elapsed_s, int iters,
-                           double final_resid, bool converged)
+                           double final_resid, bool converged, uint64_t solve_flops)
 {
   const std::string elapsed = format_metric_str(elapsed_s);
   const std::string resid = format_metric_str(final_resid);
   FILE *f = fopen(csv_path.c_str(), "a");
   if (!f) errorQuda("Could not open per-model CSV %s for append", csv_path.c_str());
-  fprintf(f, "%s,%s,%d,%g,%g,%d,%d,rhs,%d,%s,,%d,%s,%s\n", iso_timestamp().c_str(), baseline_model_name.c_str(), L,
-          baseline_beta, kappa, baseline_rng, sample, rhs_idx, elapsed.c_str(), iters, resid.c_str(),
+  // ...,rhs_idx, setup_flops(blank), solve_flops, setup_flops_opnorm(blank),
+  // solve_flops_opnorm, elapsed_s, warmup_s(blank), iters, final_resid, converged
+  fprintf(f, "%s,%s,%d,%g,%g,%d,%d,rhs,%d,,%llu,,%llu,%s,,%d,%s,%s\n", iso_timestamp().c_str(),
+          baseline_model_name.c_str(), L, baseline_beta, kappa, baseline_rng, sample, rhs_idx,
+          (unsigned long long)solve_flops, (unsigned long long)solve_flops, elapsed.c_str(), iters, resid.c_str(),
           converged ? "True" : "False");
   fclose(f);
 }
@@ -165,10 +180,16 @@ static void append_rhs_row(const std::string &csv_path, int L, int sample, int r
 // Append one averaged row to the shared aggregate CSV.
 static void append_aggregate_csv(const std::string &csv_path, int L, double avg_iters, double setup_cost_s,
                                  double rhs_cost_s, double warmup_s, double total_test_s, double avg_final_resid,
-                                 double frac_converged)
+                                 double frac_converged, uint64_t avg_setup_flops, uint64_t avg_rhs_flops,
+                                 uint64_t total_flops)
 {
+  // FLOP columns (raw integers) come after iters, before the walltime columns,
+  // in the same order as the JAX aggregate writer. _opnorm == as-written since
+  // QUDA already uses the canonical spin-projected Dslash.
   static const char *header =
-    "timestamp,model,L,beta,kappa,rng,iters,warmup_s,setup_cost_s,total_init_s,RHS_cost_s,TOTAL_s,final_resid,converged %\n";
+    "timestamp,model,L,beta,kappa,rng,iters,"
+    "setup_flops,RHS_flops,total_flops,setup_flops_opnorm,RHS_flops_opnorm,total_flops_opnorm,"
+    "warmup_s,setup_cost_s,total_init_s,RHS_cost_s,TOTAL_s,final_resid,converged %\n";
 
   bool write_header = true;
   {
@@ -187,9 +208,12 @@ static void append_aggregate_csv(const std::string &csv_path, int L, double avg_
   FILE *f = fopen(csv_path.c_str(), write_header ? "w" : "a");
   if (!f) errorQuda("Could not open aggregate CSV %s for write", csv_path.c_str());
   if (write_header) fputs(header, f);
-  fprintf(f, "%s,%s,%d,%g,%g,%d,%.4f,%s,%s,%s,%s,%s,%s,%s\n", iso_timestamp().c_str(), baseline_model_name.c_str(), L,
-          baseline_beta, kappa, baseline_rng, avg_iters, warm_s.c_str(), setup_s.c_str(), total_s.c_str(),
-          rhs_s.c_str(), total_test_str.c_str(), resid_s.c_str(), conv_s.c_str());
+  fprintf(f, "%s,%s,%d,%g,%g,%d,%.4f,%llu,%llu,%llu,%llu,%llu,%llu,%s,%s,%s,%s,%s,%s,%s\n", iso_timestamp().c_str(),
+          baseline_model_name.c_str(), L, baseline_beta, kappa, baseline_rng, avg_iters,
+          (unsigned long long)avg_setup_flops, (unsigned long long)avg_rhs_flops, (unsigned long long)total_flops,
+          (unsigned long long)avg_setup_flops, (unsigned long long)avg_rhs_flops, (unsigned long long)total_flops,
+          warm_s.c_str(), setup_s.c_str(), total_s.c_str(), rhs_s.c_str(), total_test_str.c_str(), resid_s.c_str(),
+          conv_s.c_str());
   fclose(f);
 }
 
@@ -307,6 +331,8 @@ int main(int argc, char **argv)
   double sum_setup_s = 0.0, sum_warmup_s = 0.0;
   double sum_rhs_time = 0.0, sum_iters = 0.0, sum_resid = 0.0, sum_converged = 0.0;
   long n_rhs_total = 0;
+  // Real-flop accumulators (QUDA Tunable::flops_global deltas).
+  uint64_t sum_setup_flops = 0, sum_solve_flops = 0;
   std::chrono::high_resolution_clock::time_point t_test_start{};
   bool t_test_started = false;
   bool did_cold_compile = false;
@@ -333,11 +359,14 @@ int main(int argc, char **argv)
     void *mg_handle = nullptr;
     quda::MG *mg_ptr = nullptr;
     double setup_cost_s = 0.0;
+    uint64_t setup_flops = 0;
     if (!no_precond) {
+      const uint64_t flops_before_setup = quda::Tunable::flops_global();
       auto tset0 = std::chrono::high_resolution_clock::now();
       mg_handle = newMultigridQuda(&mg_param);
       auto tset1 = std::chrono::high_resolution_clock::now();
       setup_cost_s = std::chrono::duration<double>(tset1 - tset0).count();
+      setup_flops = quda::Tunable::flops_global() - flops_before_setup;
       auto *mgs = static_cast<quda::multigrid_solver *>(mg_handle);
       mg_ptr = mgs->mg;
       printfQuda("MG setup done: %g secs (wall %.6f s)\n", mg_param.invert_param->secs, setup_cost_s);
@@ -449,9 +478,10 @@ int main(int argc, char **argv)
     auto twarm1 = std::chrono::high_resolution_clock::now();
     double warmup_s = std::chrono::duration<double>(twarm1 - twarm0).count();
 
-    append_setup_row(baseline_per_model_csv, L, sample, setup_cost_s, warmup_s);
+    append_setup_row(baseline_per_model_csv, L, sample, setup_cost_s, warmup_s, setup_flops);
     sum_setup_s += setup_cost_s;
     sum_warmup_s += warmup_s;
+    sum_setup_flops += setup_flops;
 
     // Diagnostic: how well does the V-cycle approximate (D^dag D)^{-1}?
     // Report ||(D^dag D)(mg r) - r|| / ||r|| for random r (single precision).
@@ -471,22 +501,27 @@ int main(int argc, char **argv)
       // Fresh random Gaussian source per RHS (advances the per-config RNG).
       spinorNoise(psi, rng, QUDA_NOISE_GAUSS);
 
+      const uint64_t flops_before_solve = quda::Tunable::flops_global();
       auto t0 = std::chrono::high_resolution_clock::now();
       int iters = 0;
       double final_resid = 0.0;
       run_pcg(iters, final_resid);
       auto t1 = std::chrono::high_resolution_clock::now();
       double elapsed_s = std::chrono::duration<double>(t1 - t0).count();
+      // Real-flops for this whole PCG solve: dirac->Mdag (RHS build), dirac->MdagM
+      // (A), the apply_Minv V-cycle, and all quda::blas dot/axpy/norm kernels.
+      const uint64_t solve_flops = quda::Tunable::flops_global() - flops_before_solve;
       bool converged = (iters > 0) && (final_resid < eps);
 
       printfQuda("Result: rhs=%d iters=%d elapsed_s=%.4f final_resid=%.6e converged=%s\n", j, iters, elapsed_s,
                  final_resid, converged ? "True" : "False");
 
-      append_rhs_row(baseline_per_model_csv, L, sample, j, elapsed_s, iters, final_resid, converged);
+      append_rhs_row(baseline_per_model_csv, L, sample, j, elapsed_s, iters, final_resid, converged, solve_flops);
       sum_rhs_time += elapsed_s;
       sum_iters += iters;
       sum_resid += final_resid;
       sum_converged += converged ? 1.0 : 0.0;
+      sum_solve_flops += solve_flops;
       n_rhs_total += 1;
     }
 
@@ -503,12 +538,17 @@ int main(int argc, char **argv)
   const double avg_iters = n_rhs_total > 0 ? sum_iters / n_rhs_total : 0.0;
   const double avg_resid = n_rhs_total > 0 ? sum_resid / n_rhs_total : 0.0;
   const double frac_converged = n_rhs_total > 0 ? sum_converged / n_rhs_total : 0.0;
+  // Aggregate flops: setup = avg per config, RHS = avg per solve, total = sum of
+  // all setups + all solves (analogous to TOTAL_s).
+  const uint64_t avg_setup_flops = n_configs > 0 ? sum_setup_flops / (uint64_t)n_configs : 0;
+  const uint64_t avg_rhs_flops = n_rhs_total > 0 ? sum_solve_flops / (uint64_t)n_rhs_total : 0;
+  const uint64_t total_flops = sum_setup_flops + sum_solve_flops;
   const auto t_test_end = std::chrono::high_resolution_clock::now();
   const double total_test_s =
     t_test_started ? std::chrono::duration<double>(t_test_end - t_test_start).count() : 0.0;
 
   append_aggregate_csv(baseline_aggregate_csv, L, avg_iters, avg_setup, avg_rhs_time, avg_warmup, total_test_s,
-                       avg_resid, frac_converged);
+                       avg_resid, frac_converged, avg_setup_flops, avg_rhs_flops, total_flops);
 
   printfQuda("\nWrote %d setup + %ld rhs row(s) to %s; appended aggregate row to %s\n", n_configs, n_rhs_total,
              baseline_per_model_csv.c_str(), baseline_aggregate_csv.c_str());
